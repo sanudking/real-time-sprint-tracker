@@ -1,0 +1,10 @@
+const router = require('express').Router();
+const auth = require('../middleware/authMiddleware');
+const { requireWorkspaceMember, requireAdmin } = require('../middleware/roleMiddleware');
+const c = require('../controllers/workspaceController');
+router.use(auth);
+router.post('/', c.create);
+router.get('/', c.list);
+router.post('/:id/members', requireWorkspaceMember, requireAdmin, c.addMember);
+router.delete('/:id', requireWorkspaceMember, requireAdmin, c.remove);
+module.exports = router;
