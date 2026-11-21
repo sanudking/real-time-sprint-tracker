@@ -1,6 +1,7 @@
 const Ticket = require('../models/Ticket');
 const Workspace = require('../models/Workspace');
 const asyncHandler = require('../utils/asyncHandler');
+const realtime = require('../realtime');
 
 exports.create = asyncHandler(async (req, res) => {
   const { title, description = '', priority = 'MEDIUM', assignedTo = null, workspace } = req.body;
@@ -8,7 +9,9 @@ exports.create = asyncHandler(async (req, res) => {
   if (!ws || !ws.members.some(m => m.user.toString() === req.user._id.toString())) return res.status(403).json({ message: 'Workspace access denied' });
   if (assignedTo && !ws.members.some(m => m.user.toString() === assignedTo)) return res.status(400).json({ message: 'Assignee must be a workspace member' });
   const ticket = await Ticket.create({ title, description, priority, assignedTo, workspace, createdBy: req.user._id });
-  res.status(201).json(await ticket.populate([{ path: 'assignedTo', select: 'name email' }, { path: 'createdBy', select: 'name email' }]));
+  const populated = await ticket.populate([{ path: 'assignedTo', select: 'name email' }, { path: 'createdBy', select: 'name email' }]);
+  realtime.emit(ws._id, 'ticket:created', { ticket: populated, actorId: String(req.user._id) });
+  res.status(201).json(populated);
 });
 
 exports.listByWorkspace = asyncHandler(async (req, res) => {
@@ -25,6 +28,7 @@ exports.updateStatus = asyncHandler(async (req, res) => {
   if (!ws || !ws.members.some(m => m.user.toString() === req.user._id.toString())) return res.status(403).json({ message: 'Workspace access denied' });
   const updated = await Ticket.findByIdAndUpdate(ticket._id, { status: req.body.status }, { new: true, runValidators: true })
     .populate('assignedTo', 'name email').populate('createdBy', 'name email');
+  realtime.emit(ws._id, 'ticket:updated', { ticket: updated, actorId: String(req.user._id) });
   res.json(updated);
 });
 
@@ -34,5 +38,6 @@ exports.remove = asyncHandler(async (req, res) => {
   const ws = await Workspace.findById(ticket.workspace);
   if (!ws || !ws.members.some(m => m.user.toString() === req.user._id.toString())) return res.status(403).json({ message: 'Workspace access denied' });
   await ticket.deleteOne();
+  realtime.emit(ws._id, 'ticket:deleted', { id: String(ticket._id), workspace: String(ws._id), actorId: String(req.user._id) });
   res.json({ message: 'Ticket deleted' });
 });

@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ArrowLeft, Plus, RefreshCw, Users } from 'lucide-react';
 import api from '../api/axios';
 import { useAuth } from '../context/AuthContext';
+import { useRealtime } from '../context/RealtimeContext';
 import Modal from '../components/Modal';
 import TicketCard from '../components/TicketCard';
 
@@ -10,6 +11,7 @@ const columns = ['TODO', 'IN_PROGRESS', 'REVIEW', 'DONE'];
 const label = s => s.replace('_', ' ');
 export default function BoardPage() {
   const { id } = useParams(); const { user } = useAuth();
+  const { socket, connected } = useRealtime();
   const [workspace, setWorkspace] = useState(null); const [tickets, setTickets] = useState([]); const [open, setOpen] = useState(false);
   const [form, setForm] = useState({ title: '', description: '', priority: 'MEDIUM', assignedTo: '' });
   const [inviteEmail, setInviteEmail] = useState(''); const [inviteOpen, setInviteOpen] = useState(false); const [error, setError] = useState(''); const [syncing, setSyncing] = useState(false);
@@ -20,7 +22,54 @@ export default function BoardPage() {
     catch (e) { setError(e.response?.data?.message || 'Unable to load board'); }
     finally { setSyncing(false); setLoading(false); }
   }, [id]);
-  useEffect(() => { setLoading(true); load(); const timer = setInterval(() => { if (document.visibilityState === 'visible') load(true); }, 5000); const onVisible = () => { if (document.visibilityState === 'visible') load(true); }; document.addEventListener('visibilitychange', onVisible); return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); }; }, [load]);
+
+  // Initial snapshot. Realtime deltas take over from here.
+  useEffect(() => { setLoading(true); load(); }, [load]);
+
+  // Subscribe to this workspace's room; catch up after any reconnect so we
+  // don't miss events that fired while the socket was down.
+  const loadRef = useRef(load);
+  useEffect(() => { loadRef.current = load; }, [load]);
+  useEffect(() => {
+    if (!socket) return;
+    socket.emit('workspace:join', id);
+    const onConnect = () => { socket.emit('workspace:join', id); loadRef.current(true); };
+    socket.on('connect', onConnect);
+    return () => { socket.off('connect', onConnect); socket.emit('workspace:leave', id); };
+  }, [socket, id]);
+
+  // Apply deltas from other users. Own events are skipped because the mutation
+  // handlers below already updated local state optimistically.
+  useEffect(() => {
+    if (!socket) return;
+    const mine = payload => String(payload?.actorId) === String(user?.id);
+    const onCreated = ({ ticket, actorId }) => {
+      if (mine({ actorId })) return;
+      setTickets(old => old.some(t => t._id === ticket._id) ? old : [ticket, ...old]);
+    };
+    const onUpdated = ({ ticket, actorId }) => {
+      if (mine({ actorId })) return;
+      setTickets(old => old.map(t => t._id === ticket._id ? ticket : t));
+    };
+    const onDeleted = ({ id: ticketId, actorId }) => {
+      if (mine({ actorId })) return;
+      setTickets(old => old.filter(t => t._id !== ticketId));
+    };
+    const onMemberAdded = ({ workspace: ws }) => {
+      if (ws?._id === id) setWorkspace(ws);
+    };
+    socket.on('ticket:created', onCreated);
+    socket.on('ticket:updated', onUpdated);
+    socket.on('ticket:deleted', onDeleted);
+    socket.on('member:added', onMemberAdded);
+    return () => {
+      socket.off('ticket:created', onCreated);
+      socket.off('ticket:updated', onUpdated);
+      socket.off('ticket:deleted', onDeleted);
+      socket.off('member:added', onMemberAdded);
+    };
+  }, [socket, id, user?.id]);
+
   const members = workspace?.members || [];
   const myMember = members.find(m => (m.user?._id || m.user) === user?.id);
   const isAdmin = myMember?.role === 'ADMIN';
@@ -33,8 +82,8 @@ export default function BoardPage() {
   };
   const deleteTicket = async ticketId => { const before = tickets; setTickets(old => old.filter(t => t._id !== ticketId)); try { await api.delete(`/api/tickets/${ticketId}`); } catch (e) { setTickets(before); setError(e.response?.data?.message || 'Delete failed'); } };
   const invite = async e => { e.preventDefault(); try { const { data } = await api.post(`/api/workspaces/${id}/members`, { email: inviteEmail }); setWorkspace(data); setInviteEmail(''); setInviteOpen(false); } catch (e) { setError(e.response?.data?.message || 'Invite failed'); } };
-  return <main className="min-h-screen"><header className="sticky top-0 z-20 border-b border-line bg-ink/90 backdrop-blur"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4"><div className="flex min-w-0 items-center gap-3"><Link to="/workspaces" className="text-zinc-500 hover:text-white"><ArrowLeft size={18}/></Link><div className="h-5 w-px bg-line"/><div className="min-w-0"><p className="truncate text-sm font-semibold">{workspace?.name || 'Sprint workspace'}</p><p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">Sprint board / {id.slice(-6)}</p></div></div><div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-zinc-500 sm:flex"><span className={`h-1.5 w-1.5 rounded-full ${syncing ? 'bg-amber-400' : 'bg-emerald-400'}`}/>{syncing ? 'Syncing' : 'Live · 5s'}</span>{isAdmin && <button onClick={() => setInviteOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs text-zinc-300 hover:border-zinc-500"><Users size={14}/> Invite</button>}<button onClick={() => setOpen(true)} className="flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold hover:bg-violet-400"><Plus size={15}/> New ticket</button></div></div></header>
-    <section className="mx-auto max-w-[1500px] px-5 py-8"><div className="mb-7 flex items-end justify-between"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-violet-400">Sprint overview</p><h1 className="mt-2 text-2xl font-bold">Board</h1><p className="mt-1 text-xs text-zinc-500">{tickets.length} tickets · {members.length} collaborators</p></div><button onClick={() => load()} className="text-zinc-500 hover:text-white" title="Refresh"><RefreshCw size={15}/></button></div>
+  return <main className="min-h-screen"><header className="sticky top-0 z-20 border-b border-line bg-ink/90 backdrop-blur"><div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4"><div className="flex min-w-0 items-center gap-3"><Link to="/workspaces" className="text-zinc-500 hover:text-white"><ArrowLeft size={18}/></Link><div className="h-5 w-px bg-line"/><div className="min-w-0"><p className="truncate text-sm font-semibold">{workspace?.name || 'Sprint workspace'}</p><p className="font-mono text-[9px] uppercase tracking-widest text-zinc-600">Sprint board / {id.slice(-6)}</p></div></div><div className="flex items-center gap-2"><span className="hidden items-center gap-1.5 text-xs text-zinc-500 sm:flex"><span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'}`}/>{connected ? 'Live' : 'Reconnecting…'}</span>{isAdmin && <button onClick={() => setInviteOpen(true)} className="flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-xs text-zinc-300 hover:border-zinc-500"><Users size={14}/> Invite</button>}<button onClick={() => setOpen(true)} className="flex items-center gap-1.5 rounded-lg bg-violet-500 px-3 py-2 text-xs font-semibold hover:bg-violet-400"><Plus size={15}/> New ticket</button></div></div></header>
+    <section className="mx-auto max-w-[1500px] px-5 py-8"><div className="mb-7 flex items-end justify-between"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-violet-400">Sprint overview</p><h1 className="mt-2 text-2xl font-bold">Board</h1><p className="mt-1 text-xs text-zinc-500">{tickets.length} tickets · {members.length} collaborators</p></div><button onClick={() => load()} className="text-zinc-500 hover:text-white" title="Refresh"><RefreshCw size={15} className={syncing ? 'animate-spin' : ''}/></button></div>
       {error && <div className="mb-4 flex items-center justify-between rounded-lg border border-rose-500/20 bg-rose-500/5 px-3 py-2 text-xs text-rose-300">{error}<button onClick={() => setError('')}>×</button></div>}
       {!workspace && !error && !loading ? <p className="text-sm text-zinc-500">Workspace not found.</p> : loading ? <div className="grid gap-4 xl:grid-cols-4 md:grid-cols-2">{columns.map((status, index) => <section key={status} className="min-w-0"><div className="mb-3 flex items-center gap-2 border-b border-line pb-3"><span className={`h-2 w-2 rounded-full ${['bg-zinc-500','bg-blue-400','bg-amber-400','bg-emerald-400'][index]}`}/><h2 className="font-mono text-[11px] font-semibold tracking-wider text-zinc-300">{label(status)}</h2></div><div className="space-y-2.5 animate-pulse">{[0,1].map(i => <div key={i} className="rounded-xl border border-line bg-panel p-4"><div className="h-3 w-3/4 rounded bg-white/5"/><div className="mt-3 h-2.5 w-1/2 rounded bg-white/5"/><div className="mt-3 h-5 w-16 rounded bg-white/5"/></div>)}</div></section>)}</div> : <div className="grid gap-4 xl:grid-cols-4 md:grid-cols-2">{columns.map((status, index) => <section key={status} className="min-w-0"><div className="mb-3 flex items-center justify-between border-b border-line pb-3"><div className="flex items-center gap-2"><span className={`h-2 w-2 rounded-full ${['bg-zinc-500','bg-blue-400','bg-amber-400','bg-emerald-400'][index]}`}/><h2 className="font-mono text-[11px] font-semibold tracking-wider text-zinc-300">{label(status)}</h2><span className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500">{grouped[status].length}</span></div></div><div className="space-y-2.5">{grouped[status].map(t => <TicketCard key={t._id} ticket={t} onStatus={changeStatus} onDelete={deleteTicket}/>)}</div>{grouped[status].length === 0 && <div className="rounded-xl border border-dashed border-line/80 py-8 text-center text-[11px] text-zinc-700">No tickets</div>}</section>)}</div>}
     </section>

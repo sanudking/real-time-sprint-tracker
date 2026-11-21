@@ -1,6 +1,7 @@
 const Workspace = require('../models/Workspace');
 const User = require('../models/User');
 const asyncHandler = require('../utils/asyncHandler');
+const realtime = require('../realtime');
 
 exports.create = asyncHandler(async (req, res) => {
   const name = String(req.body.name || '').trim();
@@ -21,7 +22,9 @@ exports.addMember = asyncHandler(async (req, res) => {
   if (req.workspace.members.some(m => m.user.toString() === user._id.toString())) return res.status(409).json({ message: 'User is already a member' });
   req.workspace.members.push({ user: user._id, role: 'MEMBER' });
   await req.workspace.save();
-  res.status(200).json(await Workspace.findById(req.workspace._id).populate('members.user', 'name email'));
+  const populated = await Workspace.findById(req.workspace._id).populate('members.user', 'name email');
+  realtime.emit(req.workspace._id, 'member:added', { workspace: populated, actorId: String(req.user._id) });
+  res.status(200).json(populated);
 });
 
 exports.remove = asyncHandler(async (req, res) => {

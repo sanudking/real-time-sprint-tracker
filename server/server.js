@@ -1,11 +1,16 @@
 require('dotenv').config();
+const http = require('http');
 const express = require('express');
 const cors = require('cors');
+const jwt = require('jsonwebtoken');
 const connectDB = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
 const workspaceRoutes = require('./routes/workspaceRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const errorMiddleware = require('./middleware/errorMiddleware');
+const User = require('./models/User');
+const Workspace = require('./models/Workspace');
+const realtime = require('./realtime');
 
 const app = express();
 
@@ -32,10 +37,14 @@ function isAllowedOrigin(origin) {
   return originPatterns.some((p) => (typeof p === 'string' ? p === origin : p.test(origin)));
 }
 
+// Both the `cors` package and Socket.IO expect a callback-style origin
+// resolver; returning a boolean instead would hang the handshake.
+function corsOrigin(origin, callback) {
+  callback(null, isAllowedOrigin(origin) ? origin : false);
+}
+
 app.use(cors({
-  origin(origin, callback) {
-    callback(null, isAllowedOrigin(origin) ? origin : false);
-  },
+  origin: corsOrigin,
   credentials: true,
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
@@ -54,8 +63,51 @@ app.use('/api/tickets', ticketRoutes);
 app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
 app.use(errorMiddleware);
 
-if (process.env.NODE_ENV !== 'production') {
-  const port = process.env.PORT || 5000;
-  app.listen(port, () => console.log(`API listening on ${port}`));
-}
+const httpServer = http.createServer(app);
+const io = realtime.init(httpServer, corsOrigin);
+
+// Authenticate every socket with the same JWT used by the REST API.
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    if (!token) return next(new Error('Authentication required'));
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    await connectDB();
+    const user = await User.findById(payload.id).select('_id name email');
+    if (!user) return next(new Error('User no longer exists'));
+    socket.data.user = user;
+    next();
+  } catch (err) {
+    next(new Error('Invalid or expired token'));
+  }
+});
+
+io.on('connection', (socket) => {
+  // Joining a room is authorised server-side; never trust the client's id.
+  socket.on('workspace:join', async (workspaceId, ack) => {
+    try {
+      if (!workspaceId || !/^[a-f\d]{24}$/i.test(String(workspaceId))) {
+        return ack?.({ ok: false, message: 'Invalid workspace id' });
+      }
+      await connectDB();
+      const workspace = await Workspace.findById(workspaceId);
+      const isMember = workspace?.members.some(
+        (m) => m.user.toString() === socket.data.user._id.toString()
+      );
+      if (!isMember) return ack?.({ ok: false, message: 'Not a workspace member' });
+      socket.join(realtime.room(workspaceId));
+      ack?.({ ok: true });
+    } catch (err) {
+      ack?.({ ok: false, message: 'Could not join workspace' });
+    }
+  });
+
+  socket.on('workspace:leave', (workspaceId) => {
+    if (workspaceId) socket.leave(realtime.room(workspaceId));
+  });
+});
+
+const port = process.env.PORT || 5000;
+httpServer.listen(port, '0.0.0.0', () => console.log(`API + realtime listening on ${port}`));
+
 module.exports = app;

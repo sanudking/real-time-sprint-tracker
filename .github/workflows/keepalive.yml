@@ -1,0 +1,28 @@
+name: keepalive
+
+# Render's free plan spins a web service down after ~15 minutes without inbound
+# traffic, which drops every WebSocket. A 10-minute ping keeps it warm, and
+# 730 h/month of uptime fits inside Render's 750 free instance hours.
+#
+# Note: GitHub disables scheduled workflows after 60 days without repo activity.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping API health endpoint
+        run: |
+          for attempt in 1 2 3; do
+            if curl -fsS --max-time 90 "${{ vars.API_HEALTH_URL }}"; then
+              echo "OK on attempt $attempt"
+              exit 0
+            fi
+            echo "Attempt $attempt failed, retrying..."
+            sleep 15
+          done
+          echo "Health check failed after 3 attempts"
+          exit 1
