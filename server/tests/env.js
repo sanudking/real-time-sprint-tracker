@@ -9,17 +9,27 @@ process.env.CLIENT_ORIGIN = process.env.CLIENT_ORIGIN || 'http://localhost:5173'
 process.env.PORT = '0';
 
 /**
- * Point every connection at a disposable database. connectDB() in the app reads
- * MONGO_URI directly, so rewriting it here keeps app and tests in sync — two
- * different connection strings would make Mongoose throw.
+ * Force every connection at a disposable database whose name ends in `_test`.
+ *
+ * This is not cosmetic. A MONGO_URI with no database name resolves to a
+ * database literally called `test`, so app code and tests would share it and
+ * the suite's clear() would delete real data. If MONGO_TEST_URI is not given
+ * we always derive a `_test` name, never reuse the app database.
  */
 function testUri(base) {
-  if (process.env.MONGO_TEST_URI) return process.env.MONGO_TEST_URI;
+  if (process.env.MONGO_TEST_URI) {
+    if (!/_test(\?|$)/.test(process.env.MONGO_TEST_URI)) {
+      throw new Error('MONGO_TEST_URI must point at a database whose name ends in "_test"');
+    }
+    return process.env.MONGO_TEST_URI;
+  }
   if (!base) return 'mongodb://127.0.0.1:27017/sprint_tracker_test';
+
   const [head, query] = base.split('?');
   const match = head.match(/^(mongodb(?:\+srv)?:\/\/[^/]+)(?:\/([^/]*))?$/);
   if (!match) return base;
   const [, origin, db] = match;
+  // No database name in the URI -> default would be `test`, which may be live data.
   const name = db && db.trim() ? `${db}_test` : 'sprint_tracker_test';
   return `${origin}/${name}${query ? `?${query}` : ''}`;
 }
