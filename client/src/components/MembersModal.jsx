@@ -3,6 +3,7 @@ import { Crown, Shield, ShieldOff, UserMinus } from 'lucide-react';
 import api from '../api/axios';
 import Modal from './Modal';
 import { Field } from './Form';
+import { initials } from '../utils/format';
 
 export default function MembersModal({ workspace, isAdmin, currentUserId, onClose, onChange }) {
   const [email, setEmail] = useState('');
@@ -54,12 +55,15 @@ export default function MembersModal({ workspace, isAdmin, currentUserId, onClos
         const isOwner = (ownerId || '') === m._id;
         const isSelf = m._id === currentUserId;
         return <li key={m._id} className="flex items-center justify-between gap-3 rounded-lg border border-line bg-ink/60 px-3 py-2.5">
-          <div className="min-w-0">
-            <p className="flex items-center gap-1.5 truncate text-sm text-zinc-200">
-              {m.name}{isSelf && <span className="text-[10px] text-zinc-600">(you)</span>}
-              {isOwner && <Crown size={12} className="text-amber-400" title="Owner"/>}
-            </p>
-            <p className="truncate text-[11px] text-zinc-600">{m.email}</p>
+          <div className="flex min-w-0 items-center gap-2.5">
+            <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-violet-500/15 font-mono text-[10px] font-semibold text-violet-200">{initials(m.name)}</span>
+            <div className="min-w-0">
+              <p className="flex items-center gap-1.5 truncate text-sm text-zinc-200">
+                {m.name}{isSelf && <span className="text-[10px] text-zinc-600">(you)</span>}
+                {isOwner && <Crown size={12} className="text-amber-400" title="Owner"/>}
+              </p>
+              <p className="truncate text-[11px] text-zinc-600">{m.email}</p>
+            </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <span className={`rounded border px-1.5 py-0.5 font-mono text-[9px] ${role === 'ADMIN' ? 'border-violet-400/30 text-violet-300' : 'border-line text-zinc-500'}`}>{role}</span>

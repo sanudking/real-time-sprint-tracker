@@ -3,6 +3,7 @@ const { Server } = require('socket.io');
 let io = null;
 
 const room = (workspaceId) => `ws:${workspaceId}`;
+const userRoom = (userId) => `user:${userId}`;
 
 function init(httpServer, corsOrigin) {
   io = new Server(httpServer, {
@@ -23,4 +24,10 @@ function emit(workspaceId, event, payload) {
   io.to(room(workspaceId)).emit(event, payload);
 }
 
-module.exports = { init, emit, room, getIO: () => io };
+/** Deliver an event to a single user across every device they have open. */
+function emitToUser(userId, event, payload) {
+  if (!io || !userId) return;
+  io.to(userRoom(userId)).emit(event, payload);
+}
+
+module.exports = { init, emit, emitToUser, room, userRoom, getIO: () => io };

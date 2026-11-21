@@ -1,4 +1,5 @@
 const Workspace = require('../models/Workspace');
+const Ticket = require('../models/Ticket');
 const User = require('../models/User');
 const asyncHandler = require('../utils/asyncHandler');
 const realtime = require('../realtime');
@@ -13,6 +14,87 @@ exports.create = asyncHandler(async (req, res) => {
 exports.list = asyncHandler(async (req, res) => {
   const workspaces = await Workspace.find({ 'members.user': req.user._id }).populate('members.user', 'name email').sort({ updatedAt: -1 });
   res.json(workspaces);
+});
+
+/** Board insights: per-column counts, overdue/due-soon, points and per-assignee load. */
+exports.stats = asyncHandler(async (req, res) => {
+  const ws = req.workspace;
+  const tickets = await Ticket.find({ workspace: ws._id, archived: false }).populate('assignedTo', 'name email');
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const in7Days = new Date(startOfToday.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  const byStatus = { TODO: 0, IN_PROGRESS: 0, REVIEW: 0, DONE: 0 };
+  const byPriority = { LOW: 0, MEDIUM: 0, HIGH: 0 };
+  const byAssignee = {};
+  let pointsTotal = 0;
+  let pointsDone = 0;
+  let overdue = 0;
+  let dueSoon = 0;
+
+  for (const t of tickets) {
+    byStatus[t.status] = (byStatus[t.status] || 0) + 1;
+    byPriority[t.priority] = (byPriority[t.priority] || 0) + 1;
+    pointsTotal += t.points || 0;
+    if (t.status === 'DONE') pointsDone += t.points || 0;
+
+    const key = t.assignedTo?._id ? String(t.assignedTo._id) : 'unassigned';
+    if (!byAssignee[key]) {
+      byAssignee[key] = {
+        name: t.assignedTo?.name || 'Unassigned',
+        total: 0, done: 0, points: 0
+      };
+    }
+    byAssignee[key].total += 1;
+    byAssignee[key].points += t.points || 0;
+    if (t.status === 'DONE') byAssignee[key].done += 1;
+
+    if (t.dueDate && t.status !== 'DONE') {
+      const due = new Date(t.dueDate);
+      if (due < startOfToday) overdue += 1;
+      else if (due <= in7Days) dueSoon += 1;
+    }
+  }
+
+  const total = tickets.length;
+  res.json({
+    total,
+    byStatus,
+    byPriority,
+    byAssignee: Object.values(byAssignee).sort((a, b) => b.total - a.total),
+    points: { total: pointsTotal, done: pointsDone },
+    completion: total ? Math.round((byStatus.DONE / total) * 100) : 0,
+    overdue,
+    dueSoon
+  });
+});
+
+/** Every open ticket assigned to me, across all my workspaces. */
+exports.myWork = asyncHandler(async (req, res) => {
+  const workspaces = await Workspace.find({ 'members.user': req.user._id }).select('_id name');
+  const workspaceIds = workspaces.map(w => w._id);
+  const tickets = await Ticket.find({
+    workspace: { $in: workspaceIds },
+    assignedTo: req.user._id,
+    archived: false
+  })
+    .populate('assignedTo', 'name email')
+    .populate('createdBy', 'name email')
+    .populate('workspace', 'name')
+    .sort({ dueDate: 1, priority: -1, createdAt: -1 })
+    .limit(200);
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  res.json({
+    tickets,
+    counts: {
+      total: tickets.length,
+      open: tickets.filter(t => t.status !== 'DONE').length,
+      overdue: tickets.filter(t => t.dueDate && t.status !== 'DONE' && new Date(t.dueDate) < startOfToday).length
+    }
+  });
 });
 
 exports.addMember = asyncHandler(async (req, res) => {
@@ -57,7 +139,18 @@ exports.updateMemberRole = asyncHandler(async (req, res) => {
   res.status(200).json(populated);
 });
 
+exports.rename = asyncHandler(async (req, res) => {
+  const name = String(req.body.name || '').trim();
+  if (!name) return res.status(400).json({ message: 'Workspace name is required' });
+  req.workspace.name = name.slice(0, 100);
+  await req.workspace.save();
+  const populated = await Workspace.findById(req.workspace._id).populate('members.user', 'name email');
+  realtime.emit(req.workspace._id, 'workspace:updated', { workspace: populated, actorId: String(req.user._id) });
+  res.json(populated);
+});
+
 exports.remove = asyncHandler(async (req, res) => {
+  await Ticket.deleteMany({ workspace: req.workspace._id });
   await req.workspace.deleteOne();
   res.json({ message: 'Workspace deleted' });
 });

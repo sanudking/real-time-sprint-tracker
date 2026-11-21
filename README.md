@@ -14,9 +14,49 @@ Browser (Vercel) ──HTTPS──▶ Express + Socket.IO (Render) ──▶ Mon
 ## How realtime works
 - The socket authenticates with the same JWT as the REST API (`socket.handshake.auth.token`).
 - A client joins a room only after the server re-checks workspace membership — never trust the client's id.
-- Controllers emit `ticket:created`, `ticket:updated`, `ticket:deleted` and `member:added` to that room.
+- Controllers emit `ticket:created`, `ticket:updated`, `ticket:deleted`, `ticket:bulk`, `activity:created`,
+  `comment:created` and `member:*` to that room.
+- Each socket also joins a personal `user:<id>` room, so notifications reach you on any device even when
+  no board is open.
+- `presence:update` broadcasts who is currently viewing a board (in-memory, keyed by user so two tabs count once).
 - The board loads once over REST, then applies socket deltas. Events carry `actorId` so the originator skips its own echo (it already applied the change optimistically).
 - On reconnect the board refetches once, because sockets do not replay missed messages.
+
+## Features
+**Board**
+- Drag-and-drop across To do / In progress / Review / Done, plus a one-click advance button on each card.
+- Sprint health strip: completion %, overdue, due within 7 days, story points delivered, workload per assignee.
+- Search, filters (assignee, priority, label), and a "my tickets" toggle.
+- Multi-select cards for bulk move / reprioritise / reassign / archive.
+- Archive view with restore, and CSV export of the whole board (quoted correctly for Excel).
+- Keyboard shortcuts: `/` focuses search, `n` opens the new-ticket dialog, `Esc` clears the selection.
+- Live presence avatars for everyone currently on the board.
+
+**Tickets**
+- Labels (deduped, colour-coded), due dates with overdue/due-soon chips, story points and subtasks with progress.
+- Per-ticket activity trail (created, moved, edited, commented, archived) with a 90-day TTL.
+- Comments with `@name` mention autocomplete; mentions and assignments raise notifications.
+
+**Workspace**
+- "My work" page listing everything assigned to you across every workspace.
+- Admin-only rename and delete (delete also removes the workspace's tickets).
+- In-app notification inbox (assignment, mention, comment) that updates live.
+
+## API surface
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/workspaces/my-work` | Open tickets assigned to the caller |
+| `GET` | `/api/workspaces/:id/stats` | Board metrics for the sprint strip |
+| `PATCH` | `/api/workspaces/:id` | Rename workspace (admin) |
+| `GET` | `/api/tickets/workspace/:id?archived=true` | List archived tickets |
+| `GET` | `/api/tickets/workspace/:id/export` | CSV download |
+| `POST` | `/api/tickets/bulk` | Update up to 100 tickets at once |
+| `PATCH` | `/api/tickets/:id/archive` | Archive / restore |
+| `GET` | `/api/tickets/:id/activity` | Audit trail |
+| `POST`/`PATCH`/`DELETE` | `/api/tickets/:id/subtasks[/:subtaskId]` | Subtask CRUD |
+| `GET` | `/api/notifications` | Inbox + unread count |
+| `POST` | `/api/notifications/read` | Mark all read |
+
 
 ## Local development
 1. Install Node.js 20+ and create a MongoDB Atlas cluster.
@@ -63,5 +103,6 @@ uptime fits inside Render's 750 free instance hours.
 
 ## Notes
 - Environment variables are read at boot; restart/redeploy after changing them.
-- Rooms are in-memory, so this assumes a single instance. Add `@socket.io/redis-adapter` before scaling horizontally.
-- This starter includes basic validation and authorization. Before production, add rate limiting, email verification/password reset, audit logs, pagination, request logging, and automated tests. Consider refresh-token rotation and a managed secrets policy.
+- Rooms are in-memory, so this assumes a single instance. Add `@socket.io/redis-adapter` before scaling horizontally. Presence has the same caveat: it is per-process.
+- Rate limiting, JWT auth and workspace roles are in place. Still missing for a real production run: email verification, password reset, refresh-token rotation and a managed secrets policy.
+- Activity documents expire after 90 days via a TTL index; MongoDB enforces that in the background.

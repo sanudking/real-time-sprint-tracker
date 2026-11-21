@@ -8,6 +8,7 @@ const authRoutes = require('./routes/authRoutes');
 const workspaceRoutes = require('./routes/workspaceRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
 const commentRoutes = require('./routes/commentRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const errorMiddleware = require('./middleware/errorMiddleware');
 const { authLimiter, apiLimiter } = require('./middleware/rateLimit');
 const User = require('./models/User');
@@ -67,6 +68,7 @@ app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/workspaces', workspaceRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/comments', commentRoutes);
+app.use('/api/notifications', notificationRoutes);
 app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
 app.use(errorMiddleware);
 
@@ -89,7 +91,41 @@ io.use(async (socket, next) => {
   }
 });
 
+/**
+ * Presence: who is currently looking at each board. Tracked in memory per
+ * workspace, keyed by user id so two tabs from one person count once.
+ */
+const presence = new Map(); // workspaceId -> Map(userId -> { name, sockets:Set })
+
+function presenceList(workspaceId) {
+  const room = presence.get(String(workspaceId));
+  if (!room) return [];
+  return [...room.entries()].map(([id, v]) => ({ _id: id, name: v.name }));
+}
+
+function broadcastPresence(workspaceId) {
+  realtime.emit(workspaceId, 'presence:update', {
+    workspace: String(workspaceId),
+    users: presenceList(workspaceId)
+  });
+}
+
+function leavePresence(socket, workspaceId) {
+  const key = String(workspaceId);
+  const room = presence.get(key);
+  if (!room) return;
+  const entry = room.get(String(socket.data.user._id));
+  if (!entry) return;
+  entry.sockets.delete(socket.id);
+  if (!entry.sockets.size) room.delete(String(socket.data.user._id));
+  if (!room.size) presence.delete(key);
+  broadcastPresence(key);
+}
+
 io.on('connection', (socket) => {
+  // Personal room for notifications, independent of any board being open.
+  socket.join(realtime.userRoom(socket.data.user._id));
+
   // Joining a room is authorised server-side; never trust the client's id.
   socket.on('workspace:join', async (workspaceId, ack) => {
     try {
@@ -102,15 +138,35 @@ io.on('connection', (socket) => {
         (m) => m.user.toString() === socket.data.user._id.toString()
       );
       if (!isMember) return ack?.({ ok: false, message: 'Not a workspace member' });
+
       socket.join(realtime.room(workspaceId));
-      ack?.({ ok: true });
+      socket.data.workspaces = socket.data.workspaces || new Set();
+      socket.data.workspaces.add(String(workspaceId));
+
+      const key = String(workspaceId);
+      if (!presence.has(key)) presence.set(key, new Map());
+      const room = presence.get(key);
+      const userId = String(socket.data.user._id);
+      if (!room.has(userId)) room.set(userId, { name: socket.data.user.name, sockets: new Set() });
+      room.get(userId).sockets.add(socket.id);
+      broadcastPresence(key);
+
+      ack?.({ ok: true, users: presenceList(key) });
     } catch (err) {
       ack?.({ ok: false, message: 'Could not join workspace' });
     }
   });
 
   socket.on('workspace:leave', (workspaceId) => {
-    if (workspaceId) socket.leave(realtime.room(workspaceId));
+    if (!workspaceId) return;
+    socket.leave(realtime.room(workspaceId));
+    socket.data.workspaces?.delete(String(workspaceId));
+    leavePresence(socket, workspaceId);
+  });
+
+  socket.on('disconnect', () => {
+    for (const workspaceId of socket.data.workspaces || []) leavePresence(socket, workspaceId);
+    socket.data.workspaces?.clear();
   });
 });
 

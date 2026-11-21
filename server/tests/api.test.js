@@ -280,3 +280,162 @@ describe('realtime', () => {
     ownerSocket.close();
   });
 });
+
+describe('ticket metadata', () => {
+  it('stores labels, due date, points and dedupes labels', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const res = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Rich ticket', workspace: ws._id, labels: ['Bug', 'bug', 'UI'], points: 5, dueDate: '2030-01-15' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.labels).toEqual(['bug', 'ui']);
+    expect(res.body.points).toBe(5);
+    expect(res.body.dueDate.slice(0, 10)).toBe('2030-01-15');
+  });
+
+  it('rejects an invalid due date', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const created = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'T', workspace: ws._id });
+    const res = await request(app).patch(`/api/tickets/${created.body._id}`).set('Authorization', `Bearer ${owner.token}`)
+      .send({ dueDate: 'not-a-date' });
+    expect(res.status).toBe(400);
+  });
+
+  it('adds, completes and removes subtasks', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const ticket = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Chunky', workspace: ws._id });
+
+    const added = await request(app).post(`/api/tickets/${ticket.body._id}/subtasks`).set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Write the migration' });
+    expect(added.status).toBe(201);
+    expect(added.body.subtasks).toHaveLength(1);
+
+    const subId = added.body.subtasks[0]._id;
+    const toggled = await request(app).patch(`/api/tickets/${ticket.body._id}/subtasks/${subId}`).set('Authorization', `Bearer ${owner.token}`)
+      .send({ done: true });
+    expect(toggled.body.subtasks[0].done).toBe(true);
+
+    const removed = await request(app).delete(`/api/tickets/${ticket.body._id}/subtasks/${subId}`).set('Authorization', `Bearer ${owner.token}`);
+    expect(removed.body.subtasks).toHaveLength(0);
+  });
+
+  it('records an activity trail for edits', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const ticket = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Track me', workspace: ws._id });
+    await request(app).patch(`/api/tickets/${ticket.body._id}/status`).set('Authorization', `Bearer ${owner.token}`).send({ status: 'DONE' });
+
+    const res = await request(app).get(`/api/tickets/${ticket.body._id}/activity`).set('Authorization', `Bearer ${owner.token}`);
+    expect(res.status).toBe(200);
+    expect(res.body.some(a => a.action === 'moved')).toBe(true);
+  });
+
+  it('archives and restores a ticket', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const ticket = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Old work', workspace: ws._id });
+
+    await request(app).patch(`/api/tickets/${ticket.body._id}/archive`).set('Authorization', `Bearer ${owner.token}`).send({ archived: true });
+    const active = await request(app).get(`/api/tickets/workspace/${ws._id}`).set('Authorization', `Bearer ${owner.token}`);
+    expect(active.body).toHaveLength(0);
+
+    const archived = await request(app).get(`/api/tickets/workspace/${ws._id}?archived=true`).set('Authorization', `Bearer ${owner.token}`);
+    expect(archived.body).toHaveLength(1);
+  });
+
+  it('bulk-updates several tickets at once', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const a = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`).send({ title: 'A', workspace: ws._id });
+    const b = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`).send({ title: 'B', workspace: ws._id });
+
+    const res = await request(app).post('/api/tickets/bulk').set('Authorization', `Bearer ${owner.token}`)
+      .send({ ids: [a.body._id, b.body._id], priority: 'HIGH', status: 'REVIEW' });
+    expect(res.status).toBe(200);
+    expect(res.body.every(t => t.priority === 'HIGH' && t.status === 'REVIEW')).toBe(true);
+  });
+
+  it('exports the board as CSV', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Comma, "quoted" title', workspace: ws._id });
+
+    const res = await request(app).get(`/api/tickets/workspace/${ws._id}/export`).set('Authorization', `Bearer ${owner.token}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/csv/);
+    expect(res.text.split('\n')[0]).toContain('title,status,priority');
+    expect(res.text).toContain('"Comma, ""quoted"" title"');
+  });
+
+  it('reports workspace stats and my-work', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Mine', workspace: ws._id, assignedTo: owner.user.id, points: 3, status: 'DONE' });
+
+    const stats = await request(app).get(`/api/workspaces/${ws._id}/stats`).set('Authorization', `Bearer ${owner.token}`);
+    expect(stats.status).toBe(200);
+    expect(stats.body.total).toBe(1);
+    expect(stats.body.completion).toBe(100);
+    expect(stats.body.points.total).toBe(3);
+
+    const mine = await request(app).get('/api/workspaces/my-work').set('Authorization', `Bearer ${owner.token}`);
+    expect(mine.status).toBe(200);
+    expect(mine.body.tickets).toHaveLength(1);
+  });
+
+  it('notifies an assignee and mentions', async () => {
+    const owner = await register('Owner');
+    const member = await register('Member');
+    const ws = await createWorkspace(owner.token);
+    await request(app).post(`/api/workspaces/${ws._id}/members`).set('Authorization', `Bearer ${owner.token}`).send({ email: member.email });
+
+    const ticket = await request(app).post('/api/tickets').set('Authorization', `Bearer ${owner.token}`)
+      .send({ title: 'Hand off', workspace: ws._id, assignedTo: member.user.id });
+    expect(ticket.status).toBe(201);
+
+    const assigneeNotes = await request(app).get('/api/notifications').set('Authorization', `Bearer ${member.token}`);
+    expect(assigneeNotes.body.notifications.some(n => n.type === 'ASSIGNED')).toBe(true);
+
+    await request(app).post('/api/comments').set('Authorization', `Bearer ${owner.token}`)
+      .send({ ticket: ticket.body._id, body: `hey @${member.user.name} can you take this?` });
+
+    const afterMention = await request(app).get('/api/notifications').set('Authorization', `Bearer ${member.token}`);
+    expect(afterMention.body.notifications.some(n => n.type === 'MENTION')).toBe(true);
+  });
+
+  it('only lets admins rename a workspace', async () => {
+    const owner = await register('Owner');
+    const member = await register('Member');
+    const ws = await createWorkspace(owner.token);
+    await request(app).post(`/api/workspaces/${ws._id}/members`).set('Authorization', `Bearer ${owner.token}`).send({ email: member.email });
+
+    const denied = await request(app).patch(`/api/workspaces/${ws._id}`).set('Authorization', `Bearer ${member.token}`).send({ name: 'Nope' });
+    expect(denied.status).toBe(403);
+
+    const allowed = await request(app).patch(`/api/workspaces/${ws._id}`).set('Authorization', `Bearer ${owner.token}`).send({ name: 'Renamed' });
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.name).toBe('Renamed');
+  });
+
+  it('broadcasts presence to the room', async () => {
+    const owner = await register('Owner');
+    const ws = await createWorkspace(owner.token);
+    const socket = await connectSocket(owner.token);
+
+    const seen = nextEvent(socket, 'presence:update');
+    await join(socket, ws._id);
+    const payload = await seen;
+    expect(payload.users.map(u => u.name)).toContain('Owner');
+
+    socket.close();
+  });
+});

@@ -3,8 +3,10 @@ const Ticket = require('../models/Ticket');
 const Workspace = require('../models/Workspace');
 const asyncHandler = require('../utils/asyncHandler');
 const realtime = require('../realtime');
+const { logActivity, notify, extractMentions } = require('../utils/activity');
 
-const isMember = (ws, userId) => ws?.members.some((m) => m.user.toString() === String(userId));
+// `members.user` may be a populated document here, so compare ids only.
+const isMember = (ws, userId) => ws?.members.some((m) => String(m.user?._id || m.user) === String(userId));
 
 exports.listByTicket = asyncHandler(async (req, res) => {
   const ticket = await Ticket.findById(req.params.ticketId);
@@ -20,7 +22,7 @@ exports.create = asyncHandler(async (req, res) => {
   if (!body) return res.status(400).json({ message: 'Comment cannot be empty' });
   const ticket = await Ticket.findById(req.body.ticket);
   if (!ticket) return res.status(404).json({ message: 'Ticket not found' });
-  const ws = await Workspace.findById(ticket.workspace);
+  const ws = await Workspace.findById(ticket.workspace).populate('members.user', 'name email');
   if (!isMember(ws, req.user._id)) return res.status(403).json({ message: 'Workspace access denied' });
 
   const comment = await Comment.create({
@@ -31,6 +33,30 @@ exports.create = asyncHandler(async (req, res) => {
     comment: populated,
     ticketId: String(ticket._id),
     actorId: String(req.user._id)
+  });
+
+  // @mentions win over the generic "new comment" ping so a person gets one
+  // notification, not two.
+  const mentioned = extractMentions(body, ws).filter(u => String(u._id) !== String(req.user._id));
+  const mentionedIds = new Set(mentioned.map(u => String(u._id)));
+  for (const user of mentioned) {
+    await notify({
+      userId: user._id, actor: req.user._id, workspace: ws._id, ticket: ticket._id,
+      type: 'MENTION', message: `${req.user.name} mentioned you on “${ticket.title}”`
+    });
+  }
+
+  const assigneeId = ticket.assignedTo ? String(ticket.assignedTo) : null;
+  if (assigneeId && !mentionedIds.has(assigneeId) && assigneeId !== String(req.user._id)) {
+    await notify({
+      userId: assigneeId, actor: req.user._id, workspace: ws._id, ticket: ticket._id,
+      type: 'COMMENT', message: `${req.user.name} commented on “${ticket.title}”`
+    });
+  }
+
+  await logActivity({
+    ticket: ticket._id, workspace: ws._id, actor: req.user._id, action: 'commented',
+    detail: `commented: ${body.slice(0, 80)}${body.length > 80 ? '…' : ''}`
   });
   res.status(201).json(populated);
 });
