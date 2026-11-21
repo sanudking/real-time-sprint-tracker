@@ -6,5 +6,7 @@ router.use(auth);
 router.post('/', c.create);
 router.get('/', c.list);
 router.post('/:id/members', requireWorkspaceMember, requireAdmin, c.addMember);
+router.patch('/:id/members/:userId', requireWorkspaceMember, requireAdmin, c.updateMemberRole);
+router.delete('/:id/members/:userId', requireWorkspaceMember, requireAdmin, c.removeMember);
 router.delete('/:id', requireWorkspaceMember, requireAdmin, c.remove);
 module.exports = router;

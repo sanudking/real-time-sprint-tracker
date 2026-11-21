@@ -5,6 +5,7 @@ const c = require('../controllers/ticketController');
 router.use(auth);
 router.post('/', c.create);
 router.get('/workspace/:workspaceId', requireWorkspaceMember, c.listByWorkspace);
+router.patch('/:id', c.update);
 router.patch('/:id/status', c.updateStatus);
 router.delete('/:id', c.remove);
 module.exports = router;

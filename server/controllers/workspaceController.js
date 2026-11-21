@@ -27,6 +27,36 @@ exports.addMember = asyncHandler(async (req, res) => {
   res.status(200).json(populated);
 });
 
+exports.removeMember = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const target = req.workspace.members.find(m => m.user.toString() === String(userId));
+  if (!target) return res.status(404).json({ message: 'That user is not a member' });
+  if (req.workspace.owner.toString() === String(userId)) {
+    return res.status(400).json({ message: 'The workspace owner cannot be removed' });
+  }
+  req.workspace.members = req.workspace.members.filter(m => m.user.toString() !== String(userId));
+  await req.workspace.save();
+  const populated = await Workspace.findById(req.workspace._id).populate('members.user', 'name email');
+  realtime.emit(req.workspace._id, 'member:removed', { workspace: populated, userId: String(userId), actorId: String(req.user._id) });
+  res.status(200).json(populated);
+});
+
+exports.updateMemberRole = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+  const role = String(req.body.role || '').toUpperCase();
+  if (!['ADMIN', 'MEMBER'].includes(role)) return res.status(400).json({ message: 'Role must be ADMIN or MEMBER' });
+  if (req.workspace.owner.toString() === String(userId) && role !== 'ADMIN') {
+    return res.status(400).json({ message: 'The workspace owner must stay an admin' });
+  }
+  const target = req.workspace.members.find(m => m.user.toString() === String(userId));
+  if (!target) return res.status(404).json({ message: 'That user is not a member' });
+  target.role = role;
+  await req.workspace.save();
+  const populated = await Workspace.findById(req.workspace._id).populate('members.user', 'name email');
+  realtime.emit(req.workspace._id, 'member:updated', { workspace: populated, userId: String(userId), actorId: String(req.user._id) });
+  res.status(200).json(populated);
+});
+
 exports.remove = asyncHandler(async (req, res) => {
   await req.workspace.deleteOne();
   res.json({ message: 'Workspace deleted' });

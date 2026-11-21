@@ -1,9 +1,10 @@
 import { useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, Navigate, useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { Layers3 } from 'lucide-react';
 export default function AuthPage({ mode }) {
   const isRegister = mode === 'register'; const { token, login, register } = useAuth(); const navigate = useNavigate();
+  const [params] = useSearchParams(); const expired = params.get('expired') === '1';
   const [form, setForm] = useState({ name: '', email: '', password: '' }); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   if (token) return <Navigate to="/workspaces" replace/>;
   const change = e => setForm({ ...form, [e.target.name]: e.target.value });
@@ -12,6 +13,7 @@ export default function AuthPage({ mode }) {
     <div className="mb-8 flex items-center justify-center gap-2"><div className="rounded-lg bg-violet-500/15 p-2 text-violet-300"><Layers3 size={22}/></div><span className="text-lg font-bold tracking-tight">sprint<span className="text-violet-400">board</span></span></div>
     <div className="rounded-2xl border border-line bg-panel p-7"><h1 className="text-xl font-semibold">{isRegister ? 'Create your account' : 'Welcome back'}</h1><p className="mt-1 text-sm text-zinc-500">{isRegister ? 'Start collaborating with your team.' : 'Sign in to continue to your workspace.'}</p>
       <form onSubmit={submit} className="mt-6 space-y-4">
+        {expired && !error && <p className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">Your session expired. Please sign in again.</p>}
         {isRegister && <Field label="Name" name="name" value={form.name} onChange={change} placeholder="Your name"/>}
         <Field label="Email" name="email" type="email" value={form.email} onChange={change} placeholder="you@company.com"/>
         <Field label="Password" name="password" type="password" value={form.password} onChange={change} placeholder="At least 8 characters"/>

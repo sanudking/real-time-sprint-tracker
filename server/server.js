@@ -7,12 +7,17 @@ const connectDB = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
 const workspaceRoutes = require('./routes/workspaceRoutes');
 const ticketRoutes = require('./routes/ticketRoutes');
+const commentRoutes = require('./routes/commentRoutes');
 const errorMiddleware = require('./middleware/errorMiddleware');
+const { authLimiter, apiLimiter } = require('./middleware/rateLimit');
 const User = require('./models/User');
 const Workspace = require('./models/Workspace');
 const realtime = require('./realtime');
 
 const app = express();
+// Render (and most PaaS) terminate TLS in front of the app, so trust the
+// proxy header — otherwise rate limiting sees every request as one client.
+app.set('trust proxy', 1);
 
 // CLIENT_ORIGIN may hold a comma-separated list and may use `*` wildcards
 // (e.g. https://*-sanudkings-projects.vercel.app) so preview deployments work.
@@ -57,9 +62,11 @@ app.use('/api', async (req, res, next) => {
 });
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-app.use('/api/auth', authRoutes);
+app.use('/api', apiLimiter);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/workspaces', workspaceRoutes);
 app.use('/api/tickets', ticketRoutes);
+app.use('/api/comments', commentRoutes);
 app.use((req, res) => res.status(404).json({ message: 'Route not found' }));
 app.use(errorMiddleware);
 
@@ -111,3 +118,5 @@ const port = process.env.PORT || 5000;
 httpServer.listen(port, '0.0.0.0', () => console.log(`API + realtime listening on ${port}`));
 
 module.exports = app;
+module.exports.httpServer = httpServer;
+module.exports.io = io;
